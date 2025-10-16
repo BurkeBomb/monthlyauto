@@ -1,103 +1,97 @@
 #!/usr/bin/env python3
-import os
-import re
-import csv
-import json
-import argparse
+import argparse, re, json, sys
+from pathlib import Path
+import pandas as pd
 
-def load_alias_map(path):
-    alias_map = {}
-    with open(path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            scheme = row['scheme']
-            regex = row['alias_regex']
-            alias_map[scheme] = re.compile(regex, re.IGNORECASE)
-    return alias_map
+def load_alias_map(path: Path):
+    df = pd.read_csv(path)
+    rules = []
+    for _, row in df.iterrows():
+        rules.append((row["scheme"], re.compile(row["alias_regex"])))
+    return rules
 
-def classify(description, alias_map):
-    for scheme, pattern in alias_map.items():
-        if pattern.search(description):
+def detect_scheme_from_desc(desc: str, rules):
+    for scheme, pattern in rules:
+        if pattern.search(desc):
             return scheme
-    return 'UNKNOWN'
+    return "UNMAPPED"
+
+def load_bank(dir_path: Path, rules):
+    frames = []
+    for csv in sorted(dir_path.glob("*.csv")):
+        try:
+            df = pd.read_csv(csv)
+        except Exception as e:
+            print(f"[warn] Could not read {csv}: {e}", file=sys.stderr)
+            continue
+        cols = {c.lower(): c for c in df.columns}
+        amount_col = cols.get("amount")
+        desc_col = cols.get("description") or cols.get("details") or cols.get("narration")
+        if not amount_col or not desc_col:
+            print(f"[warn] {csv} missing required columns (Amount, Description) -> skipping", file=sys.stderr)
+            continue
+        df = df.rename(columns={amount_col: "Amount", desc_col: "Description"})
+        df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0.0)
+        df["SchemeDetected"] = df["Description"].astype(str).apply(lambda d: detect_scheme_from_desc(d, rules))
+        frames.append(df[["Description", "Amount", "SchemeDetected"]])
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["Description","Amount","SchemeDetected"])
+
+def load_remits(dir_path: Path):
+    frames = []
+    for csv in sorted(dir_path.glob("*.csv")):
+        try:
+            df = pd.read_csv(csv)
+        except Exception as e:
+            print(f"[warn] Could not read {csv}: {e}", file=sys.stderr)
+            continue
+        cols = {c.lower(): c for c in df.columns}
+        scheme_col = cols.get("scheme")
+        amount_col = cols.get("amount")
+        if not scheme_col or not amount_col:
+            print(f"[warn] {csv} missing required columns (Scheme, Amount) -> skipping", file=sys.stderr)
+            continue
+        df = df.rename(columns={scheme_col: "Scheme", amount_col: "Amount"})
+        df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0.0)
+        frames.append(df[["Scheme","Amount"]])
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=["Scheme","Amount"])
 
 def main():
-    parser = argparse.ArgumentParser(description='Reconcile bank transactions against remittance advice.')
-    parser.add_argument('--in', dest='bank_dir', default='data/bank', help='Directory with bank CSV files')
-    parser.add_argument('--remits', dest='remits_dir', default='data/remits', help='Directory with remittance CSV files')
-    parser.add_argument('--alias', dest='alias_file', default='data/ALIAS_MAP.csv', help='CSV file with scheme regex mappings')
-    parser.add_argument('--out', dest='out_dir', default='out', help='Output directory')
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="Reconcile bank vs remits by scheme alias rules.")
+    ap.add_argument("--in", dest="bank_dir", required=True)
+    ap.add_argument("--remits", dest="remits_dir", required=True)
+    ap.add_argument("--alias", dest="alias_csv", required=True)
+    ap.add_argument("--out", dest="out_dir", required=True)
+    args = ap.parse_args()
 
-    alias_map = load_alias_map(args.alias_file)
+    out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    rules = load_alias_map(Path(args.alias_csv))
 
-    # Parse bank transactions
-    bank_totals = {}
-    for fname in os.listdir(args.bank_dir):
-        path = os.path.join(args.bank_dir, fname)
-        if not fname.lower().endswith('.csv'):
-            continue
-        with open(path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                desc = row.get('Description') or row.get('Narration') or row.get('Details') or ''
-                amount_str = row.get('Amount') or row.get('amount') or row.get('Debit/Credit') or '0'
-                try:
-                    amount = float(amount_str.replace(',', ''))
-                except Exception:
-                    amount = 0.0
-                scheme = classify(desc, alias_map)
-                bank_totals[scheme] = bank_totals.get(scheme, 0.0) + amount
+    bank_df = load_bank(Path(args.bank_dir), rules)
+    rem_df  = load_remits(Path(args.remits_dir))
 
-    # Parse remittance advice
-    remit_totals = {}
-    for fname in os.listdir(args.remits_dir):
-        path = os.path.join(args.remits_dir, fname)
-        if not fname.lower().endswith('.csv'):
-            continue
-        with open(path, 'r', encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                scheme = row.get('Scheme') or row.get('scheme')
-                amount_str = row.get('Amount') or row.get('amount') or '0'
-                try:
-                    amount = float(amount_str.replace(',', ''))
-                except Exception:
-                    amount = 0.0
-                remit_totals[scheme] = remit_totals.get(scheme, 0.0) + amount
+    bank_totals = bank_df.groupby("SchemeDetected", dropna=False)["Amount"].sum().rename("BankTotal").reset_index()
+    rem_totals  = rem_df.groupby("Scheme", dropna=False)["Amount"].sum().rename("RemitTotal").reset_index()
 
-    # Identify unmatched totals
-    unmatched = []
-    for scheme, bank_total in bank_totals.items():
-        remit_total = remit_totals.get(scheme, 0.0)
-        if abs(bank_total - remit_total) > 0.01:
-            unmatched.append({
-                'scheme': scheme,
-                'bank_total': round(bank_total, 2),
-                'remit_total': round(remit_total, 2),
-                'difference': round(bank_total - remit_total, 2)
-            })
+    merged = pd.merge(bank_totals, rem_totals, left_on="SchemeDetected", right_on="Scheme", how="outer")
+    merged["SchemeFinal"] = merged["SchemeDetected"].fillna(merged["Scheme"])
+    merged = merged.drop(columns=["SchemeDetected","Scheme"])
+    merged = merged.groupby("SchemeFinal", dropna=False).sum(numeric_only=True).reset_index()
 
-    # Ensure output directory exists
-    os.makedirs(args.out_dir, exist_ok=True)
+    merged["BankTotal"] = merged["BankTotal"].fillna(0.0)
+    merged["RemitTotal"] = merged["RemitTotal"].fillna(0.0)
+    merged["Delta"] = merged["BankTotal"] - merged["RemitTotal"]
+    merged["AbsDelta"] = merged["Delta"].abs()
+    merged = merged.sort_values("AbsDelta", ascending=False)
 
-    # Write unmatched.csv
-    unmatched_csv = os.path.join(args.out_dir, 'unmatched.csv')
-    with open(unmatched_csv, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=['scheme', 'bank_total', 'remit_total', 'difference'])
-        writer.writeheader()
-        for row in unmatched:
-            writer.writerow(row)
-
-    # Write kpis.json
-    kpi_path = os.path.join(args.out_dir, 'kpis.json')
+    (out_dir / "unmatched.csv").write_text(merged.drop(columns=["AbsDelta"]).to_csv(index=False))
     kpis = {
-        'unmatched_count': len(unmatched),
-        'bank_totals': {k: round(v, 2) for k, v in bank_totals.items()},
-        'remit_totals': {k: round(v, 2) for k, v in remit_totals.items()}
+        "total_bank": float(merged["BankTotal"].sum()),
+        "total_remits": float(merged["RemitTotal"].sum()),
+        "net_delta": float((merged["BankTotal"] - merged["RemitTotal"]).sum()),
+        "top_gaps": merged.head(5)[["SchemeFinal","BankTotal","RemitTotal","Delta"]].to_dict(orient="records"),
     }
-    with open(kpi_path, 'w', encoding='utf-8') as f:
-        json.dump(kpis, f, indent=2)
+    (out_dir / "kpis.json").write_text(json.dumps(kpis, indent=2))
+    print("[ok] Wrote unmatched.csv and kpis.json")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
