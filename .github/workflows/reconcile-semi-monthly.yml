@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -36,7 +36,7 @@ jobs:
             --alias data/ALIAS_MAP.csv \
             --out out
 
-      - name: Build report (HTML + PDF)
+      - name: Build HTML + PDF report
         run: |
           python scripts/make_report.py out \
             --pdf out/unmatched.pdf \
