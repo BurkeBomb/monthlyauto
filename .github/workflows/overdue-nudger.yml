@@ -18,11 +18,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Build overdue nudger
+      - name: Build overdue nudger outputs
         run: |
           mkdir -p out
           python scripts/overdue_nudger.py \
