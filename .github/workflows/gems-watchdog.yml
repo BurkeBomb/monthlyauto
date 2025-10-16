@@ -1,0 +1,35 @@
+name: gems-watchdog
+
+on:
+  schedule:
+    - cron: '0 5 * * *'   # 07:00 SAST (UTC+2) = 05:00 UTC
+  workflow_dispatch: {}
+  push:
+    paths:
+      - 'data/gems/**'
+    branches:
+      - main
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Classify GEMS mails and draft replies
+        run: |
+          mkdir -p out
+          python scripts/gems_watchdog.py \
+            --in data/gems \
+            --out out
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gems-watchdog
+          path: out/
