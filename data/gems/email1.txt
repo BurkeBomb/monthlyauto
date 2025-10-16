@@ -1,0 +1,10 @@
+Subject: Missing Authorization
+
+Dear Provider,
+
+We have processed your claim but found that the authorization number is missing. The claim cannot be processed without a valid authorization.
+
+Please provide the updated authorization details and resubmit the claim.
+
+Regards,
+GEMS Claims Team
